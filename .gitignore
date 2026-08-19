@@ -1,0 +1,14 @@
+# ---------------------------------------------------------------
+#  Never commit personal data.
+#  The app's Export button writes files like chamber-backup-2026-08-19.json
+#  which contain every note, chat message and pasted image. If one of those
+#  lands in this folder it must NOT be published to a public repo.
+# ---------------------------------------------------------------
+chamber-backup-*.json
+*.backup.json
+backups/
+
+# local scratch
+.DS_Store
+Thumbs.db
+desktop.ini
