@@ -1,0 +1,61 @@
+{
+  "name": "the-chamber",
+  "productName": "The Chamber",
+  "version": "1.0.0",
+  "description": "A pixel-art Victorian study that works as a personal organizer.",
+  "author": {
+    "name": "makumochi"
+  },
+  "license": "MIT",
+  "private": true,
+  "main": "desktop/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "com.makumochi.thechamber",
+    "productName": "The Chamber",
+    "files": [
+      "index.html",
+      "desktop/**/*",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "The Chamber"
+    },
+    "portable": {
+      "artifactName": "TheChamber-portable-${version}.exe"
+    }
+  },
+  "devDependencies": {
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3"
+  }
+}

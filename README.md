@@ -15,10 +15,12 @@ HTML file — no build step, no frameworks, no CDN links. Open it and it runs.
 Everything you write lives in **your browser's IndexedDB**, on your machine.
 Nothing is uploaded, and this repo contains no personal data — only the app itself.
 
-> **Storage is per-origin.** Notes saved at `localhost:8777` are a *different
-> store* from notes saved at `makumochi.github.io`. Moving between the two does
-> not carry your data across. Use **Settings → EXPORT JSON** on the old address
-> and **IMPORT JSON** on the new one.
+> **Each way of running it has its own separate store.** Notes saved at
+> `localhost:8777`, at `makumochi.github.io`, and in the desktop app are three
+> different places — browser storage is keyed to the exact address, and the
+> desktop app uses files instead. Moving between them does not carry your data
+> across by itself. Use **Settings → EXPORT JSON** in the old one and
+> **IMPORT JSON** in the new one.
 
 Because browsers can evict site data under storage pressure, the app asks for
 persistent storage on load and shows the result in **Settings → Storage & Backup**
@@ -32,10 +34,48 @@ message and pasted image. `.gitignore` already blocks `chamber-backup-*.json`.
 
 ## Running it
 
-**Online:** just visit the live link above. Nothing to install.
+There are three ways, and they do **not** share data — each is its own store.
 
-**Locally:** double-click `Open The Chamber.bat`, which starts a small server in
-this folder and opens the room.
+### 1. Desktop app (most durable)
+
+Build it once:
+
+```bash
+npm install
+npm run dist
+```
+
+That produces two files in `dist/`:
+
+| File | What it is |
+| --- | --- |
+| `The Chamber Setup 1.0.0.exe` | installer — Start Menu entry and desktop shortcut |
+| `TheChamber-portable-1.0.0.exe` | single file, runs from anywhere, no install |
+
+The desktop build keeps everything in ordinary files under
+`%APPDATA%\The Chamber\`:
+
+```
+chamber.json            the whole document
+backups\backup-*.json   rolling snapshots, five kept
+assets\<id>.bin         audio tracks, sprites, wallpaper
+```
+
+No browser can evict these. Every write is atomic — the document goes to a
+temp file, is flushed to disk, then renamed over the real one, so a crash or a
+power cut leaves the previous good file rather than a half-written one.
+**Help → Where is my data?** shows the exact paths, and File → Open data folder
+takes you there. Copy that folder to move or archive your room.
+
+### 2. Online
+
+Visit the live link above. Nothing to install. Data lives in browser storage,
+which the browser is allowed to clear.
+
+### 3. Local server
+
+Double-click `Open The Chamber.bat`, which starts a small server in this folder
+and opens the room. Same browser-storage caveat.
 
 Or by hand:
 

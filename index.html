@@ -1595,9 +1595,89 @@ const UI = {
    back to localStorage so the app still works, in a degraded mode:
    no file handles, no blob previews.
    ========================================================================= */
+/* -------------------------------------------------------------------------
+   [SECTION: DESKTOP BACKEND]
+   When the page runs inside the Electron shell, window.chamberDesktop exists
+   and everything is kept in real files instead of IndexedDB:
+
+     %APPDATA%\the-chamber\chamber.json    the whole document
+     %APPDATA%\the-chamber\assets\*.bin    audio, sprites, wallpaper
+     %APPDATA%\the-chamber\backups\*.json  rolling snapshots
+
+   The document is mirrored in memory and flushed on a debounce, so the rest
+   of the app keeps the same async Store API it already had. Nothing here is
+   reachable from the browser build - Store.mode stays "idb" there.
+   ---------------------------------------------------------------------- */
+const Desktop = {
+  api: (typeof window !== "undefined" && window.chamberDesktop) || null,
+  doc: null,
+  dirty: false,
+  timer: null,
+  blobCache: {},          // assetId -> Blob, so we do not re-read files constantly
+
+  get on(){ return !!this.api; },
+
+  async load(){
+    this.doc = await this.api.load();
+    this.doc.kv = this.doc.kv || {};
+    this.doc.messages = this.doc.messages || [];
+    this.doc.layout = this.doc.layout || [];
+    this.doc.stores = this.doc.stores || {};
+    for (const s of ["tracks","sprites","roomConfig","files"]) this.doc.stores[s] = this.doc.stores[s] || [];
+    return this.doc;
+  },
+
+  /* debounced flush - the app writes often, the disk should not */
+  touch(){
+    this.dirty = true;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.flush(), 400);
+  },
+
+  async flush(){
+    if (!this.dirty || !this.doc) return;
+    this.dirty = false;
+    try { await this.api.save(this.doc); }
+    catch(err){
+      this.dirty = true;
+      console.error("[chamber] desktop save failed", err);
+      toast("Could not write to disk: " + (err && err.message ? err.message : err), "warn", 12000);
+    }
+  },
+
+  /* records keep their metadata in the JSON; Blobs go to their own file */
+  async stash(rec){
+    const out = Object.assign({}, rec);
+    if (rec.blob instanceof Blob){
+      const id = rec.id;
+      const buf = await rec.blob.arrayBuffer();
+      await this.api.putAsset(id, buf);
+      this.blobCache[id] = rec.blob;
+      out.blob = null;
+      out.__asset = id;
+      out.__type = rec.blob.type || "application/octet-stream";
+      out.__size = rec.blob.size;
+    }
+    return out;
+  },
+
+  async hydrate(rec){
+    if (!rec || !rec.__asset) return rec;
+    const out = Object.assign({}, rec);
+    if (this.blobCache[rec.__asset]) { out.blob = this.blobCache[rec.__asset]; return out; }
+    const buf = await this.api.getAsset(rec.__asset);
+    if (buf){
+      out.blob = new Blob([buf], { type: rec.__type || "application/octet-stream" });
+      this.blobCache[rec.__asset] = out.blob;
+    }
+    return out;
+  }
+};
+
 const Store = {
   db: null,
   ok: false,              // true => IndexedDB, false => localStorage fallback
+  mode: "idb",            // "desktop" | "idb" | "local"
   persisted: false,       // true => the browser promised not to evict us
   quota: null,            // { usage, quota, pct } from the last estimate
   nagged: false,          // only nag about exporting once per session
@@ -1608,6 +1688,7 @@ const Store = {
      for an installed/engaged origin and refuses otherwise, so a refusal is
      normal and must not look like an error. */
   async requestPersistence(){
+    if (this.mode === "desktop"){ this.persisted = true; return true; }  // real files
     try {
       if (!navigator.storage || !navigator.storage.persist) return false;
       if (navigator.storage.persisted) this.persisted = await navigator.storage.persisted();
@@ -1632,6 +1713,7 @@ const Store = {
 
   /* one discreet nudge when things look risky */
   async nagIfRisky(){
+    if (this.mode === "desktop") return;      // nothing to nag about: it is a file
     if (this.nagged) return;
     const q = await this.estimate();
     const tight = q && q.pct >= CONFIG.QUOTA_WARN_AT;
@@ -1645,6 +1727,19 @@ const Store = {
   },
 
   async open(){
+    /* Desktop shell wins outright: real files, nothing to evict. */
+    if (Desktop.on){
+      try {
+        await Desktop.load();
+        this.mode = "desktop";
+        this.ok = true;              // blob-capable, same as IndexedDB
+        this.persisted = true;       // files on disk cannot be evicted
+        return;
+      } catch(err){
+        console.error("[chamber] desktop store failed, falling back", err);
+        Desktop.api = null;
+      }
+    }
     try {
       this.db = await new Promise((resolve, reject) => {
         if (!self.indexedDB) return reject(new Error("no indexedDB"));
@@ -1682,11 +1777,13 @@ const Store = {
 
   /* ---- key/value (state + backups) ---- */
   async kvGet(k){
+    if (this.mode === "desktop") return Desktop.doc.kv[k] !== undefined ? Desktop.doc.kv[k] : null;
     if (this.ok){ const rec = await this._req(this._os("kv","readonly").get(k)); return rec ? rec.v : null; }
     const raw = localStorage.getItem("chamber:kv:" + k);
     return raw ? JSON.parse(raw) : null;
   },
   async kvSet(k, v){
+    if (this.mode === "desktop"){ Desktop.doc.kv[k] = v; Desktop.touch(); return; }
     if (this.ok){ await this._req(this._os("kv","readwrite").put({ k:k, v:v })); return; }
     localStorage.setItem("chamber:kv:" + k, JSON.stringify(v));
   },
@@ -1694,6 +1791,9 @@ const Store = {
   /* ---- messages ---- */
   async msgsFor(owner){
     let list;
+    if (this.mode === "desktop"){
+      return Desktop.doc.messages.filter(m => m.owner === owner).sort((a,b) => a.seq - b.seq);
+    }
     if (this.ok){ list = await this._req(this._os("messages","readonly").index("owner").getAll(owner)); }
     else {
       const raw = localStorage.getItem("chamber:msgs:" + owner);
@@ -1702,6 +1802,12 @@ const Store = {
     return list.sort((a,b) => a.seq - b.seq);
   },
   async msgPut(m){                       // append / edit a SINGLE message
+    if (this.mode === "desktop"){
+      const i = Desktop.doc.messages.findIndex(x => x.id === m.id);
+      if (i >= 0) Desktop.doc.messages[i] = m; else Desktop.doc.messages.push(m);
+      Desktop.touch();
+      return;
+    }
     if (this.ok){ await this._req(this._os("messages","readwrite").put(m)); return; }
     const key = "chamber:msgs:" + m.owner;
     const list = JSON.parse(localStorage.getItem(key) || "[]");
@@ -1710,12 +1816,18 @@ const Store = {
     localStorage.setItem(key, JSON.stringify(list));
   },
   async msgDelete(m){
+    if (this.mode === "desktop"){
+      Desktop.doc.messages = Desktop.doc.messages.filter(x => x.id !== m.id);
+      Desktop.touch();
+      return;
+    }
     if (this.ok){ await this._req(this._os("messages","readwrite").delete(m.id)); return; }
     const key = "chamber:msgs:" + m.owner;
     const list = JSON.parse(localStorage.getItem(key) || "[]").filter(x => x.id !== m.id);
     localStorage.setItem(key, JSON.stringify(list));
   },
   async msgsAll(){
+    if (this.mode === "desktop") return Desktop.doc.messages.slice();
     if (this.ok) return await this._req(this._os("messages","readonly").getAll());
     const out = [];
     for (let i = 0; i < localStorage.length; i++){
@@ -1727,17 +1839,37 @@ const Store = {
 
   /* ---- files (handles + previews) ---- */
   async filePut(rec){
+    if (this.mode === "desktop"){
+      /* A FileSystemFileHandle cannot be written to JSON, so on the desktop
+         an attachment keeps its metadata, its typed path and its preview. */
+      const slim = Object.assign({}, rec, { handle:null, blob:rec.preview || null });
+      delete slim.preview;
+      const stashed = await Desktop.stash(slim);
+      const arr = Desktop.doc.stores.files;
+      const i = arr.findIndex(x => x.id === rec.id);
+      if (i >= 0) arr[i] = stashed; else arr.push(stashed);
+      Desktop.touch();
+      return;
+    }
     if (this.ok){ await this._req(this._os("files","readwrite").put(rec)); return; }
     // fallback: metadata only, no handle, no blob
     const slim = Object.assign({}, rec); delete slim.handle; delete slim.preview;
     localStorage.setItem("chamber:file:" + rec.id, JSON.stringify(slim));
   },
   async fileGet(id){
+    if (this.mode === "desktop"){
+      const rec = Desktop.doc.stores.files.find(x => x.id === id);
+      if (!rec) return null;
+      const full = await Desktop.hydrate(rec);
+      full.preview = full.blob || null;      // the app expects .preview
+      return full;
+    }
     if (this.ok) return await this._req(this._os("files","readonly").get(id));
     const raw = localStorage.getItem("chamber:file:" + id);
     return raw ? JSON.parse(raw) : null;
   },
   async filesAll(){
+    if (this.mode === "desktop") return Desktop.doc.stores.files.slice();
     if (this.ok) return await this._req(this._os("files","readonly").getAll());
     const out = [];
     for (let i = 0; i < localStorage.length; i++){
@@ -1754,7 +1886,12 @@ const Store = {
     try {
       for (const m of await this.msgsFor(owner)) await this.msgDelete(m);
       for (const f of await this.filesAll()) if (f.owner === owner){
-        if (this.ok) await this._req(this._os("files","readwrite").delete(f.id));
+        if (this.mode === "desktop"){
+          if (f.__asset) await Desktop.api.deleteAsset(f.__asset);
+          Desktop.doc.stores.files = Desktop.doc.stores.files.filter(x => x.id !== f.id);
+          Desktop.touch();
+        }
+        else if (this.ok) await this._req(this._os("files","readwrite").delete(f.id));
         else localStorage.removeItem("chamber:file:" + f.id);
       }
     } catch(err){ console.warn("[chamber] dropOwner failed for " + owner, err); }
@@ -1762,17 +1899,29 @@ const Store = {
 
   /* ---- room layout: { id, x (0-1 of room width), y (px above floor) } ---- */
   async layoutAll(){
+    if (this.mode === "desktop") return Desktop.doc.layout.slice();
     if (this.ok) return await this._req(this._os("roomLayout","readonly").getAll());
     const raw = localStorage.getItem("chamber:layout");
     return raw ? JSON.parse(raw) : [];
   },
   async layoutPut(rec){
+    if (this.mode === "desktop"){
+      const i = Desktop.doc.layout.findIndex(r => r.id === rec.id);
+      if (i >= 0) Desktop.doc.layout[i] = rec; else Desktop.doc.layout.push(rec);
+      Desktop.touch();
+      return;
+    }
     if (this.ok){ await this._req(this._os("roomLayout","readwrite").put(rec)); return; }
     const all = (await this.layoutAll()).filter(r => r.id !== rec.id);
     all.push(rec);
     localStorage.setItem("chamber:layout", JSON.stringify(all));
   },
   async layoutDelete(id){
+    if (this.mode === "desktop"){
+      Desktop.doc.layout = Desktop.doc.layout.filter(r => r.id !== id);
+      Desktop.touch();
+      return;
+    }
     if (this.ok){
       try { await this._req(this._os("roomLayout","readwrite").delete(id)); } catch(err){}
       return;
@@ -1781,6 +1930,7 @@ const Store = {
     localStorage.setItem("chamber:layout", JSON.stringify(all));
   },
   async layoutClear(){
+    if (this.mode === "desktop"){ Desktop.doc.layout = []; Desktop.touch(); return; }
     if (this.ok){ await this._req(this._os("roomLayout","readwrite").clear()); return; }
     localStorage.removeItem("chamber:layout");
   },
@@ -1792,20 +1942,46 @@ const Store = {
   blobStoreAvailable(){ return this.ok; },
 
   async allFrom(storeName){
+    if (this.mode === "desktop"){
+      const arr = Desktop.doc.stores[storeName] || [];
+      const out = [];
+      for (const r of arr) out.push(await Desktop.hydrate(r));
+      return out;
+    }
     if (!this.ok) return [];
     try { return await this._req(this._os(storeName,"readonly").getAll()); }
     catch(err){ console.warn("[chamber] read " + storeName + " failed", err); return []; }
   },
   async getFrom(storeName, id){
+    if (this.mode === "desktop"){
+      const rec = (Desktop.doc.stores[storeName] || []).find(r => r.id === id);
+      return rec ? await Desktop.hydrate(rec) : null;
+    }
     if (!this.ok) return null;
     try { return await this._req(this._os(storeName,"readonly").get(id)); }
     catch(err){ return null; }
   },
   async putInto(storeName, rec){
+    if (this.mode === "desktop"){
+      const arr = Desktop.doc.stores[storeName] = Desktop.doc.stores[storeName] || [];
+      const stashed = await Desktop.stash(rec);
+      const i = arr.findIndex(r => r.id === rec.id);
+      if (i >= 0) arr[i] = stashed; else arr.push(stashed);
+      Desktop.touch();
+      return;
+    }
     if (!this.ok) throw new Error("IndexedDB unavailable");
     await this._req(this._os(storeName,"readwrite").put(rec));
   },
   async deleteFrom(storeName, id){
+    if (this.mode === "desktop"){
+      const arr = Desktop.doc.stores[storeName] || [];
+      const rec = arr.find(r => r.id === id);
+      if (rec && rec.__asset) await Desktop.api.deleteAsset(rec.__asset);
+      Desktop.doc.stores[storeName] = arr.filter(r => r.id !== id);
+      Desktop.touch();
+      return;
+    }
     if (!this.ok) return;
     try { await this._req(this._os(storeName,"readwrite").delete(id)); }
     catch(err){ console.warn("[chamber] delete from " + storeName + " failed", err); }
@@ -3141,7 +3317,21 @@ async function exportJson(){
     layout: await Store.layoutAll(),
     tracks: Music.tracks.map(t => ({ id:t.id, name:t.name, size:t.size, note:"audio blob not exported" }))
   };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type:"application/json" });
+  const text = JSON.stringify(payload, null, 2);
+
+  /* On the desktop this is a real Save dialog writing a real file, rather
+     than a browser download that may land somewhere you did not choose. */
+  if (Store.mode === "desktop"){
+    try {
+      const res = await Desktop.api.exportJson(text, "chamber-backup-" + dayKey() + ".json");
+      if (res && res.canceled) return;
+      UI.write({ lastExport: Date.now() });
+      toast("Backup written to " + (res && res.path ? res.path : "disk"), "ok", 8000);
+    } catch(err){ toast("Export failed: " + err.message, "warn", 8000); }
+    return;
+  }
+
+  const blob = new Blob([text], { type:"application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = "chamber-backup-" + dayKey() + ".json";
@@ -3165,9 +3355,10 @@ function backupReminder(){
   setTimeout(() => toast(msg, "warn", 14000), 3500);   // after the intro settles
 }
 
+/* accepts a File (browser) or a raw JSON string (desktop dialog) */
 async function importJson(file){
   let payload;
-  try { payload = JSON.parse(await file.text()); }
+  try { payload = JSON.parse(typeof file === "string" ? file : await file.text()); }
   catch(err){ toast("That file is not valid JSON.", "warn"); return; }
 
   const incoming = payload.state || payload;   // tolerate a bare state dump
@@ -4353,16 +4544,26 @@ const Settings = {
   async refreshStorage(){
     const badge = $("#persistBadge");
     if (!badge) return;
+    const desktop = Store.mode === "desktop";
     const persisted = Store.persisted;
-    badge.className = "badge-pill " + (persisted ? "good" : Store.ok ? "warn" : "bad");
-    badge.textContent = persisted ? "PERSISTED"
+    badge.className = "badge-pill " + (desktop || persisted ? "good" : Store.ok ? "warn" : "bad");
+    badge.textContent = desktop ? "FILES ON DISK"
+                      : persisted ? "PERSISTED"
                       : Store.ok ? "LOCAL (evictable)"
                                  : "FALLBACK (localStorage)";
-    badge.title = persisted
+    badge.title = desktop
+      ? "Stored as ordinary files in your app-data folder. No browser can clear them."
+      : persisted
       ? "The browser has promised not to evict this data under storage pressure."
       : "The browser may clear this data under storage pressure. Export JSON backups.";
-    const q = await Store.estimate();
     const txt = $("#quotaText");
+    if (desktop){
+      let where = "app data folder";
+      try { where = (await Desktop.api.paths()).dataDir; } catch(err){}
+      if (txt) txt.textContent = where;
+      return;
+    }
+    const q = await Store.estimate();
     if (txt && q) txt.textContent = fmtSize(q.usage) + " of " + fmtSize(q.quota) +
                                     " (" + (q.pct * 100).toFixed(1) + "%)";
     else if (txt) txt.textContent = "not reported by this browser";
@@ -5612,7 +5813,15 @@ const Decor = {
      is not listening yet while IndexedDB is still opening. */
   wireRoom();
   $("#btnExport").addEventListener("click", () => state ? exportJson() : notReady());
-  $("#btnImport").addEventListener("click", () => state ? $("#importFile").click() : notReady());
+  $("#btnImport").addEventListener("click", async () => {
+    if (!state) return notReady();
+    if (Store.mode === "desktop"){
+      const res = await Desktop.api.importJson();
+      if (res && !res.canceled) importJson(res.text);
+      return;
+    }
+    $("#importFile").click();
+  });
   $("#btnSettings").addEventListener("click", ev => state ? Settings.open(ev.currentTarget) : notReady());
   $("#btnPalette").addEventListener("click", () => state ? Palette.open() : notReady());
   $("#importFile").addEventListener("change", ev => {
@@ -5623,9 +5832,21 @@ const Decor = {
   await Store.open();
   await Store.requestPersistence();     // ask before writing anything of value
 
-  $("#storageMode").textContent = (Store.ok
-    ? "IndexedDB" + (Files.supported ? " + file links" : " (no file links)")
-    : "localStorage fallback") + (Store.persisted ? " - persisted" : "");
+  $("#storageMode").textContent = Store.mode === "desktop"
+    ? "Desktop — files on disk"
+    : (Store.ok ? "IndexedDB" + (Files.supported ? " + file links" : " (no file links)")
+                : "localStorage fallback") + (Store.persisted ? " - persisted" : "");
+
+  /* menu bar items in the desktop shell talk back to the page */
+  if (Store.mode === "desktop" && Desktop.api.onMenu){
+    Desktop.api.onMenu(async which => {
+      if (which === "export") return exportJson();
+      const res = await Desktop.api.importJson();
+      if (res && !res.canceled) importJson(res.text);
+    });
+    // flush any pending write before the window disappears
+    window.addEventListener("beforeunload", () => Desktop.flush());
+  }
   if (!Store.ok){
     toast("IndexedDB is blocked here (this happens on file:// in Chrome). Running on localStorage: no file links, no image previews. Serve the file over http://localhost for the full feature set.", "warn", 15000);
   }
