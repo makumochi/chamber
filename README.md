@@ -38,7 +38,12 @@ There are three ways, and they do **not** share data — each is its own store.
 
 ### 1. Desktop app (most durable)
 
-Build it once:
+**[Download the latest release](https://github.com/makumochi/chamber/releases/latest)** —
+`Setup` to install it, or `portable` to run it from anywhere without installing.
+Windows will say *"Windows protected your PC"* on first run because the app is
+not code-signed; click **More info → Run anyway**.
+
+Or build it yourself:
 
 ```bash
 npm install
