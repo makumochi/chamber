@@ -654,6 +654,8 @@ body.editing .vignette{opacity:.3}
   background:var(--wood);border:4px solid var(--ink);box-shadow:6px 6px 0 var(--shadow);
   padding:8px 12px;font-size:12px}
 #editBar .hintline{color:var(--gold-lt)}
+#editBar .scaleval{color:var(--gold-lt);min-width:44px;text-align:right;
+  border:2px solid var(--gold-dk);padding:1px 5px;background:rgba(0,0,0,.35)}
 
 /* -------------------------------------------------------------------------
    SETTINGS
@@ -1052,8 +1054,12 @@ body.paused .speech .sp-caret{animation-play-state:paused}
 
 <!-- rearrange-mode toolbar -->
 <div id="editBar" class="hidden">
-  <span class="hintline">DRAG THE FURNITURE</span>
-  <span class="muted">snap to floor</span>
+  <span class="hintline">DRAG TO MOVE &middot; SCROLL TO RESIZE</span>
+  <span class="muted">size</span><span class="scaleval" id="editScale">100%</span>
+  <button class="tiny" id="btnSizeDown">&minus;</button>
+  <button class="tiny" id="btnSizeUp">+</button>
+  <button class="tiny" id="btnSizeReset">RESET SIZE</button>
+  <span class="muted">snap</span>
   <span class="switch on" id="snapSwitch"><i></i></span>
   <button class="tiny" id="btnResetLayout">RESET LAYOUT</button>
   <button class="gold" id="btnLockLayout">LOCK LAYOUT</button>
@@ -1111,10 +1117,11 @@ body.paused .speech .sp-caret{animation-play-state:paused}
 
     <!-- working wall clock: hands are rotated by the single rAF loop -->
     <div class="wallclock" data-move="clock" id="wallClock">
-      <span class="pip" style="left:45px;top:4px"></span>
-      <span class="pip" style="left:45px;bottom:4px"></span>
-      <span class="pip" style="left:4px;top:45px"></span>
-      <span class="pip" style="right:4px;top:45px"></span>
+      <!-- pips are centred with calc so the dial stays true at any size -->
+      <span class="pip" style="left:calc(50% - 3px);top:4px"></span>
+      <span class="pip" style="left:calc(50% - 3px);bottom:4px"></span>
+      <span class="pip" style="left:4px;top:calc(50% - 3px)"></span>
+      <span class="pip" style="right:4px;top:calc(50% - 3px)"></span>
       <span class="hand h" id="handH"></span>
       <span class="hand m" id="handM"></span>
       <span class="hand s" id="handS"></span>
@@ -1356,7 +1363,8 @@ const CONFIG = {
   SPRITE_MAX_KB:    4000,       // custom room sprites / pets
   SPEECH_MS:        7000,       // how long a finished speech bubble stays up
   TYPE_MS:          15,         // milliseconds per character in the typewriter
-  WEATHER_CYCLE_MS: 8 * 60000   // how often "auto" weather rolls the dice
+  WEATHER_CYCLE_MS: 8 * 60000,  // how often "auto" weather rolls the dice
+  EXPORT_NAG_DAYS:  10          // remind about a JSON backup after this long
 };
 
 /* =========================================================================
@@ -2229,16 +2237,25 @@ function runIntro(){
   intro.addEventListener("click", () => { clearTimeout(t1); clearTimeout(t2); finish(); });
 }
 
+/* The little counters that float over the furniture: unfinished tasks per
+   room, items in the basket, tracks on the gramophone. Off by default -
+   they read as clutter on the pixel art. Settings -> ROOM turns them on. */
+function badgesOn(){ return UI.read().showBadges === true; }
+
 function updateBadges(){
+  const show = badgesOn();
   state.rooms.forEach(r => {
     const b = document.querySelector('[data-badge="' + r.id + '"]');
     if (!b) return;
     const n = countOpenTasks(r);
     b.textContent = n;
-    b.classList.toggle("hidden", n === 0);
+    b.classList.toggle("hidden", !show || n === 0);
   });
   const tb = document.querySelector('[data-badge="trash"]');
-  if (tb){ tb.textContent = state.trash.length; tb.classList.toggle("hidden", state.trash.length === 0); }
+  if (tb){ tb.textContent = state.trash.length;
+           tb.classList.toggle("hidden", !show || state.trash.length === 0); }
+  const gb = document.querySelector('[data-badge="gramophone"]');
+  if (gb && !show) gb.classList.add("hidden");
   // the room itself is a readout of the data, so refresh it here too
   if (typeof RoomEcho !== "undefined" && RoomEcho.render) RoomEcho.render();
 }
@@ -2258,6 +2275,16 @@ function wireRoom(){
     const hot = ev.target.closest("[data-hotspot]");
     if (hot) openHotspot(hot);
   });
+
+  /* Any pointer press clears the keyboard cursor. Without this the gold
+     outline and floating candle from Tab navigation stayed stuck on whatever
+     was last focused until you pressed Tab again. */
+  document.addEventListener("pointerdown", ev => {
+    if (KeyNav.el) KeyNav.blur();
+    const held = document.activeElement;
+    if (held && held.hasAttribute && held.hasAttribute("data-hotspot") &&
+        !ev.target.closest("[data-hotspot]")) held.blur();
+  }, true);
 
   /* right-click a frame to edit its bookmark, in either mode */
   $("#room").addEventListener("contextmenu", ev => {
@@ -3120,7 +3147,22 @@ async function exportJson(){
   a.download = "chamber-backup-" + dayKey() + ".json";
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 20000);
+  UI.write({ lastExport: Date.now() });          // resets the backup reminder
   toast("Exported.", "ok");
+}
+
+/* A browser can evict site data, and no amount of code in this page can stop
+   it. The only real protection is a file on disk, so nag - gently, once per
+   session - when the last export is getting old or was never taken. */
+function backupReminder(){
+  const ui = UI.read();
+  const last = ui.lastExport || 0;
+  const days = last ? Math.floor((Date.now() - last) / 86400000) : null;
+  if (last && days < CONFIG.EXPORT_NAG_DAYS) return;
+  const msg = last
+    ? "Your last backup was " + days + " days ago. Settings -> EXPORT JSON keeps a copy safe on disk."
+    : "No backup taken yet. Browsers can clear site data on their own - Settings -> EXPORT JSON puts a copy on disk.";
+  setTimeout(() => toast(msg, "warn", 14000), 3500);   // after the intro settles
 }
 
 async function importJson(file){
@@ -3741,8 +3783,12 @@ const RoomEcho = {
     if (!h) return;
     const d = new Date();
     const sec = d.getSeconds(), min = d.getMinutes(), hr = d.getHours() % 12;
+    /* Second and minute hands STEP, they do not sweep. A real clock creeps
+       the minute hand through the minute, but on a pixel dial that reads as
+       a misaligned hand at 10:00 sharp, so both snap to their marks. The
+       hour hand still travels gradually - it should be halfway at half past. */
     s.style.transform = "translate3d(0,0,0) rotate(" + (sec * 6) + "deg)";
-    m.style.transform = "translate3d(0,0,0) rotate(" + (min * 6 + sec * 0.1) + "deg)";
+    m.style.transform = "translate3d(0,0,0) rotate(" + (min * 6) + "deg)";
     h.style.transform = "translate3d(0,0,0) rotate(" + (hr * 30 + min * 0.5) + "deg)";
   },
 
@@ -3783,8 +3829,57 @@ const Layout = {
   apply(el){
     const rec = this.data[el.getAttribute("data-move")];
     if (!rec) return;
-    el.style.left = (rec.x * 100).toFixed(3) + "%";
-    el.style.bottom = "calc(var(--floor-line) + " + Math.round(rec.y) + "px)";
+    if (typeof rec.x === "number") el.style.left = (rec.x * 100).toFixed(3) + "%";
+    if (typeof rec.y === "number") el.style.bottom = "calc(var(--floor-line) + " + Math.round(rec.y) + "px)";
+    el.style.transform = (rec.s && rec.s !== 1) ? "scale(" + rec.s + ")" : "";
+  },
+
+  scaleOf(id){ const r = this.data[id]; return (r && r.s) || 1; },
+
+  /* Capture an object's current position so it can be given a record the
+     first time it is scaled, before it has ever been dragged. */
+  measure(el){
+    const room = $("#room").getBoundingClientRect();
+    if (!room.width || !room.height) return { s:1 };   // no size: scale only
+    const r = el.getBoundingClientRect();
+    const floorPx = room.height * (parseFloat(getComputedStyle(document.documentElement)
+                      .getPropertyValue("--floor-line")) / 100);
+    return { x:(r.left - room.left) / room.width,
+             y:(room.bottom - r.bottom) - floorPx,
+             s:1 };
+  },
+
+  /* Resize. Multiplies the stored scale and re-applies; the drag code
+     composes this with its translate so moving a scaled object still works. */
+  scaleBy(id, factor){
+    const el = document.querySelector('[data-move="' + id + '"]');
+    if (!el) return;
+    if (!this.data[id]) this.data[id] = this.measure(el);
+    const rec = this.data[id];
+    rec.s = +clamp((rec.s || 1) * factor, 0.35, 3).toFixed(3);
+    this.apply(el);
+    this.queueSave(id);
+    const bar = $("#editScale");
+    if (bar) bar.textContent = Math.round(rec.s * 100) + "%";
+    return rec.s;
+  },
+
+  resetScale(id){
+    const rec = this.data[id];
+    if (!rec) return;
+    rec.s = 1;
+    this.apply(document.querySelector('[data-move="' + id + '"]'));
+    this.queueSave(id);
+  },
+
+  /* the wheel fires fast; coalesce the writes */
+  queueSave(id){
+    clearTimeout(this._saveTimers && this._saveTimers[id]);
+    this._saveTimers = this._saveTimers || {};
+    this._saveTimers[id] = setTimeout(() => {
+      const r = this.data[id];
+      if (r) Store.layoutPut({ id:id, x:r.x, y:r.y, s:r.s || 1 }).catch(handleWriteError);
+    }, 250);
   },
 
   enterEdit(){
@@ -3824,7 +3919,10 @@ const Layout = {
       ev.preventDefault();
       this.movedDuringDrag = false;   // so a real drag does not also open a dialog
       const r = el.getBoundingClientRect();
-      this.drag = { el:el, id:el.getAttribute("data-move"),
+      this.lastTouched = el.getAttribute("data-move");
+      const scaleBar = $("#editScale");
+      if (scaleBar) scaleBar.textContent = Math.round(this.scaleOf(this.lastTouched) * 100) + "%";
+      this.drag = { el:el, id:el.getAttribute("data-move"), s:this.scaleOf(el.getAttribute("data-move")),
                     sx:ev.clientX, sy:ev.clientY, px:ev.clientX, py:ev.clientY,
                     w:r.width, h:r.height, dx:0, dy:0 };
       el.setPointerCapture(ev.pointerId);
@@ -3853,11 +3951,35 @@ const Layout = {
       if (!d) return;
       d.dx = d.px - d.sx; d.dy = d.py - d.sy;
       if (Math.abs(d.dx) > 3 || Math.abs(d.dy) > 3) this.movedDuringDrag = true;
-      d.el.style.transform = "translate3d(" + d.dx + "px," + d.dy + "px,0)";
+      // keep any custom scale while dragging, or the object would pop to 100%
+      d.el.style.transform = "translate3d(" + d.dx + "px," + d.dy + "px,0)" +
+                             (d.s && d.s !== 1 ? " scale(" + d.s + ")" : "");
     });
+
+    /* Scroll over an object in edit mode to resize it. */
+    room.addEventListener("wheel", ev => {
+      if (!this.editing) return;
+      const el = ev.target.closest("[data-move]");
+      if (!el) return;
+      ev.preventDefault();
+      this.lastTouched = el.getAttribute("data-move");
+      this.scaleBy(this.lastTouched, ev.deltaY < 0 ? 1.08 : 1 / 1.08);
+    }, { passive:false });
 
     $("#btnLockLayout").addEventListener("click", () => this.exitEdit());
     $("#btnResetLayout").addEventListener("click", () => this.reset());
+    const needTarget = () => {
+      if (this.lastTouched) return true;
+      toast("Click or drag the piece you want to resize first.", null, 4000);
+      return false;
+    };
+    $("#btnSizeUp").addEventListener("click", () => needTarget() && this.scaleBy(this.lastTouched, 1.12));
+    $("#btnSizeDown").addEventListener("click", () => needTarget() && this.scaleBy(this.lastTouched, 1/1.12));
+    $("#btnSizeReset").addEventListener("click", () => {
+      if (!needTarget()) return;
+      this.resetScale(this.lastTouched);
+      $("#editScale").textContent = "100%";
+    });
     $("#snapSwitch").addEventListener("click", () => {
       this.snap = !this.snap;
       $("#snapSwitch").classList.toggle("on", this.snap);
@@ -3869,25 +3991,39 @@ const Layout = {
   /* turn the drag delta into stored coordinates and clear the transform */
   commit(d){
     const room = $("#room").getBoundingClientRect();
-    const r = d.el.getBoundingClientRect();          // includes the live drag
-    d.el.style.transform = "";
+    /* If the room has no size - window minimised, tab backgrounded mid-drag,
+       pane collapsed - every coordinate below divides by zero and would save
+       Infinity/NaN over a perfectly good position. Abandon the drag instead. */
+    if (!room.width || !room.height){
+      d.el.style.transform = "";
+      this.apply(d.el);              // put it back exactly where it was
+      return;
+    }
+    d.el.style.transform = "";        // drop the drag transform; apply() re-adds scale
 
+    /* Work in LAYOUT space, not painted space. offsetLeft/offsetTop ignore
+       transforms, so a scaled object lands where it was dropped instead of
+       jumping by half its scaled overhang. The offset parent is the layer,
+       which is inset:0 over the room, so these are room-relative already. */
+    const parentH = d.el.offsetParent ? d.el.offsetParent.offsetHeight : room.height;
+    const w = d.el.offsetWidth, h = d.el.offsetHeight;
     const floorPx = room.height * (parseFloat(getComputedStyle(document.documentElement)
                       .getPropertyValue("--floor-line")) / 100);
-    let x = (r.left - room.left) / room.width;
-    const bottomPx = room.bottom - r.bottom;          // the element's CSS `bottom`
-    let y = bottomPx - floorPx;                       // height above the floor line
+
+    let x = (d.el.offsetLeft + d.dx) / room.width;
+    const bottomPx = parentH - (d.el.offsetTop + h) - d.dy;   // the element's CSS `bottom`
+    let y = bottomPx - floorPx;                               // height above the floor line
 
     // keep everything on screen and above the bottom edge
-    x = clamp(x, 0, 1 - d.w / room.width);
-    const maxY = room.height - floorPx - d.h;
+    x = clamp(x, 0, Math.max(0, 1 - w / room.width));
+    const maxY = room.height - floorPx - h;
     const floorItem = d.el.hasAttribute("data-floor");
     if (floorItem && this.snap) y = 0;
     y = clamp(y, floorItem ? 0 : -floorPx + 4, Math.max(0, maxY));
 
-    this.data[d.id] = { x:x, y:y };
+    this.data[d.id] = { x:x, y:y, s:d.s || 1 };
     this.apply(d.el);
-    Store.layoutPut({ id:d.id, x:x, y:y }).catch(handleWriteError);
+    Store.layoutPut({ id:d.id, x:x, y:y, s:d.s || 1 }).catch(handleWriteError);
     if (d.id === "candle" || d.id === "library") Ambience.seedMotes();
   }
 };
@@ -3995,6 +4131,10 @@ const Settings = {
             '<button class="tiny" data-set="resetlayout">RESET LAYOUT</button></div>' +
           '<div class="set-row"><span class="lbl">Snap furniture to the floor line</span>' +
             '<span class="switch' + (Layout.snap ? " on" : "") + '" data-set="snap"><i></i></span></div>' +
+          '<div class="set-row"><span class="lbl">Show counter badges on furniture' +
+            '<br><span class="s-lines">unfinished tasks, basket contents, track count</span></span>' +
+            '<span class="switch' + (badgesOn() ? " on" : "") + '" data-set="badges"><i></i></span></div>' +
+          '<p class="muted">In rearrange mode: drag to move, scroll the wheel over a piece to resize it.</p>' +
         "</div>" +
 
         '<div class="set-sec"><h4>UPLOAD CUSTOM WALLPAPER</h4>' +
@@ -4085,6 +4225,13 @@ const Settings = {
       if (act === "export"){ exportJson(); return; }
       if (act === "import"){ $("#importFile").click(); return; }
       if (act === "addsprite"){ $("#spriteFile").click(); return; }
+      if (act === "badges"){
+        const on = !badgesOn();
+        UI.write({ showBadges:on });
+        el.classList.toggle("on", on);
+        updateBadges(); Music.paintRoom();
+        return;
+      }
       if (act === "wpUpload"){ $("#wpFile").click(); return; }
       if (act === "wpClear"){ Wallpaper.clear().then(() => this.refreshWallpaper()); return; }
       if (act === "persist"){
@@ -4108,12 +4255,9 @@ const Settings = {
       }
       if (act === "dialogue"){ Decor.dialogueModal(sid); return; }
       if (act === "spriteBigger" || act === "spriteSmaller"){
-        const s = Decor.sprites.find(x => x.id === sid);
-        if (!s) return;
-        const k = act === "spriteBigger" ? 1.25 : 0.8;
-        s.w = clamp(Math.round(s.w * k), 24, 520);
-        s.h = clamp(Math.round(s.h * k), 24, 520);
-        Decor.save(s); Decor.render(); this.refreshSprites();
+        // same scale mechanism the furniture uses, so there is one way to resize
+        Layout.scaleBy("sprite:" + sid, act === "spriteBigger" ? 1.15 : 1/1.15);
+        this.refreshSprites();
         return;
       }
       if (act === "spriteDel"){
@@ -4174,10 +4318,12 @@ const Settings = {
       const url = URL.createObjectURL(s.blob);
       const lines = (s.lines && s.lines.length) ? s.lines.length + " own line(s)"
                                                 : "using the bundled " + PET_LINES_DEFAULT.length;
+      const pct = Math.round(Layout.scaleOf("sprite:" + s.id) * 100);
       return '<div class="sprite-row">' +
         '<img class="s-thumb" src="' + url + '" alt="">' +
         '<span class="s-name">' + esc(s.name) +
-          '<br><span class="s-lines">' + s.w + "&times;" + s.h + " &middot; " +
+          '<br><span class="s-lines">' + s.w + "&times;" + s.h +
+          (pct !== 100 ? " at " + pct + "%" : "") + " &middot; " +
           (s.isPet ? lines : "decor") + "</span></span>" +
         '<span class="switch' + (s.isPet ? " on" : "") + '" data-set="petToggle" data-sprite-id="' + s.id + '" title="toggle pet"><i></i></span>' +
         '<button class="tiny" data-set="dialogue" data-sprite-id="' + s.id + '">DIALOGUE</button>' +
@@ -4426,7 +4572,10 @@ const KeyNav = {
   },
 
   blur(){
-    if (this.el) this.el.classList.remove("focused");
+    if (this.el){
+      this.el.classList.remove("focused");
+      if (document.activeElement === this.el) this.el.blur();
+    }
     this.el = null;
     const p = $("#candlePointer");
     if (p) p.classList.remove("on");
@@ -5077,7 +5226,7 @@ const Music = {
     if (disc) disc.classList.toggle("spin", this.playing);
     if (badge){
       badge.textContent = this.tracks.length;
-      badge.classList.toggle("hidden", this.tracks.length === 0);
+      badge.classList.toggle("hidden", !badgesOn() || this.tracks.length === 0);
     }
     if (!this.playing){
       const host = $("#gNotes");
@@ -5504,6 +5653,7 @@ const Decor = {
   updateBadges();               // also renders spines / papers / candle / clock
   Loop.start();
   Store.nagIfRisky();           // one quiet nudge if the data looks fragile
+  backupReminder();             // and one if there is no recent file on disk
 
   // browsers require a gesture before any sound; the first click is enough
   document.addEventListener("pointerdown", () => Sound.wake(), { once:true });
@@ -5515,14 +5665,19 @@ const Decor = {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden){
       saveNow();
-      Loop.stop();
+      Loop.stop();                       // animation always parks in the background
       document.body.classList.add("paused");
-      if (Sound.ctx && Sound.ctx.state === "running") Sound.ctx.suspend();
+      /* The audio graph only sleeps when nothing is actually playing. The
+         gramophone routes through this same context, so suspending it while
+         a track is running would cut the music the moment you switch tabs -
+         which is not what anyone expects from a music player. */
+      if (Sound.ctx && Sound.ctx.state === "running" && !Music.playing) Sound.ctx.suspend();
     } else {
       document.body.classList.remove("paused");
       Loop.start();
       Ambience.applyLighting(true);
-      if (Sound.ctx && (Sound.on.fire || Sound.on.rain || Sound.on.clock)) Sound.ctx.resume();
+      if (Sound.ctx && (Music.playing || Sound.on.fire || Sound.on.rain || Sound.on.clock))
+        Sound.ctx.resume();
     }
   });
 
